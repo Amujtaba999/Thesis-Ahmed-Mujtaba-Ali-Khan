@@ -1,0 +1,1150 @@
+# Analysis code: Automation intensity and stock returns
+# R version used: 4.5.1
+#
+# Input files expected in data/raw/:
+#   crsp_monthly.csv
+#   compustat_annual.csv
+#   ff5_monthly.csv
+#   wrds_ratios.csv
+
+# 0. Setup
+
+rm(list = ls())
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+options(scipen = 999)
+options(dplyr.summarise.inform = FALSE)
+
+required_packages <- c(
+  "tidyverse",
+  "lubridate",
+  "janitor",
+  "fixest",
+  "sandwich",
+  "lmtest",
+  "zoo",
+  "scales",
+  "broom"
+)
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+}
+
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(fixest)
+library(sandwich)
+library(lmtest)
+library(zoo)
+library(scales)
+library(broom)
+
+dir.create("data/raw", recursive = TRUE, showWarnings = FALSE)
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+cat("Working directory:\n")
+print(getwd())
+
+cat("\nFiles in data/raw:\n")
+print(list.files("data/raw"))
+
+
+# 1. Helper functions
+
+winsorize <- function(x, probs = c(0.01, 0.99)) {
+  if (all(is.na(x))) return(x)
+  q <- quantile(x, probs = probs, na.rm = TRUE)
+  x <- ifelse(x < q[1], q[1], x)
+  x <- ifelse(x > q[2], q[2], x)
+  return(x)
+}
+
+compound_return <- function(r) {
+  if (all(is.na(r))) return(NA_real_)
+  prod(1 + r[!is.na(r)]) - 1
+}
+
+parse_date_safe <- function(x) {
+  x <- as.character(x)
+  parsed <- suppressWarnings(lubridate::ymd(x))
+  if (all(is.na(parsed))) {
+    parsed <- suppressWarnings(lubridate::dmy(x))
+  }
+  if (all(is.na(parsed))) {
+    parsed <- suppressWarnings(lubridate::mdy(x))
+  }
+  return(parsed)
+}
+
+add_missing_columns <- function(data, cols) {
+  for (col in cols) {
+    if (!col %in% names(data)) {
+      data[[col]] <- NA
+    }
+  }
+  return(data)
+}
+
+
+# 2. Import data
+crsp_raw <- read_csv(
+  "data/raw/crsp_monthly.csv",
+  col_types = cols(
+    PERMNO = col_character(),
+    PERMCO = col_character(),
+    HdrCUSIP = col_character(),
+    CUSIP = col_character(),
+    Ticker = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  clean_names()
+
+comp_raw <- read_csv(
+  "data/raw/compustat_annual.csv",
+  col_types = cols(
+    gvkey = col_character(),
+    cusip = col_character(),
+    tic = col_character(),
+    conm = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  clean_names()
+
+ff5_raw <- read_csv(
+  "data/raw/ff5_monthly.csv",
+  show_col_types = FALSE
+) %>%
+  clean_names()
+
+ratios_raw <- read_csv(
+  "data/raw/wrds_ratios.csv",
+  col_types = cols(
+    gvkey = col_character(),
+    permno = col_character(),
+    ticker = col_character(),
+    cusip = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  clean_names()
+
+cat("\nImported data dimensions:\n")
+cat("CRSP:", dim(crsp_raw), "\n")
+cat("Compustat:", dim(comp_raw), "\n")
+cat("Fama-French:", dim(ff5_raw), "\n")
+cat("WRDS ratios:", dim(ratios_raw), "\n")
+
+
+# 3. Clean CRSP monthly returns
+
+# Add optional columns if they do not exist
+crsp_raw <- add_missing_columns(
+  crsp_raw,
+  c(
+    "hdr_cusip", "cusip", "ticker", "security_nm", "primary_exch",
+    "share_type", "siccd", "naics", "mth_prc", "mth_cap",
+    "shr_out", "mth_ret", "mth_retx"
+  )
+)
+
+crsp <- crsp_raw %>%
+  mutate(
+    permno = as.character(permno),
+    permco = as.character(permco),
+    hdr_cusip = as.character(hdr_cusip),
+    cusip = as.character(cusip),
+    cusip8 = str_sub(cusip, 1, 8),
+    ticker = as.character(ticker),
+    company_name = as.character(security_nm),
+    
+    date = parse_date_safe(mth_cal_dt),
+    date = ceiling_date(date, "month") - days(1),
+    sample_year = year(date),
+    sample_month = month(date),
+    
+    primary_exchange = as.character(primary_exch),
+    share_type = as.character(share_type),
+    
+    siccd = as.numeric(siccd),
+    naics_crsp = as.character(naics),
+    
+    price = abs(as.numeric(mth_prc)),
+    market_cap = as.numeric(mth_cap),
+    shares_out = as.numeric(shr_out),
+    
+    stock_return = as.numeric(mth_ret),
+    stock_return_ex_distribution = as.numeric(mth_retx)
+  ) %>%
+  filter(!is.na(permno), !is.na(date)) %>%
+  filter(!is.na(stock_return)) %>%
+  filter(!is.na(market_cap), market_cap > 0) %>%
+  filter(is.na(share_type) | share_type == "NS") %>%
+  filter(is.na(primary_exchange) | primary_exchange %in% c("N", "Q", "A")) %>%
+  arrange(permno, date) %>%
+  group_by(permno) %>%
+  mutate(
+    lag_market_cap = lag(market_cap)
+  ) %>%
+  ungroup()
+
+write_csv(crsp, "data/processed/crsp_clean.csv")
+
+cat("\nCRSP cleaned:\n")
+cat("Rows:", nrow(crsp), "\n")
+cat("Unique firms:", n_distinct(crsp$permno), "\n")
+cat("Date range:", as.character(min(crsp$date)), "to", as.character(max(crsp$date)), "\n")
+cat("Unique months:", n_distinct(crsp$date), "\n")
+
+
+# 4. Clean Compustat annual fundamentals
+
+comp_raw <- add_missing_columns(
+  comp_raw,
+  c(
+    "datafmt", "indfmt", "consol", "curcd", "gvkey", "fyear",
+    "sic", "naics", "cusip", "tic", "conm", "at", "sale",
+    "emp", "ppent", "ppegt", "capx", "xrd", "xsga", "cogs",
+    "dp", "ni", "oibdp", "lt", "dlc", "dltt", "ceq", "seq",
+    "csho", "prcc_f", "mkvalt"
+  )
+)
+
+comp <- comp_raw %>%
+  mutate(
+    gvkey = as.character(gvkey),
+    fyear = as.integer(fyear),
+    sic = as.integer(sic),
+    naics_comp = as.character(naics),
+    cusip = as.character(cusip),
+    cusip8 = str_sub(cusip, 1, 8),
+    tic = as.character(tic),
+    conm = as.character(conm),
+    
+    at = as.numeric(at),
+    sale = as.numeric(sale),
+    emp = as.numeric(emp),
+    ppent = as.numeric(ppent),
+    ppegt = as.numeric(ppegt),
+    capx = as.numeric(capx),
+    xrd = as.numeric(xrd),
+    xsga = as.numeric(xsga),
+    cogs = as.numeric(cogs),
+    dp = as.numeric(dp),
+    ni = as.numeric(ni),
+    oibdp = as.numeric(oibdp),
+    lt = as.numeric(lt),
+    dlc = as.numeric(dlc),
+    dltt = as.numeric(dltt),
+    ceq = as.numeric(ceq),
+    seq = as.numeric(seq),
+    csho = as.numeric(csho),
+    prcc_f = as.numeric(prcc_f),
+    mkvalt = as.numeric(mkvalt)
+  ) %>%
+  filter(is.na(datafmt) | datafmt == "STD") %>%
+  filter(is.na(indfmt) | indfmt == "INDL") %>%
+  filter(is.na(consol) | consol == "C") %>%
+  filter(is.na(curcd) | curcd == "USD") %>%
+  filter(!is.na(gvkey), !is.na(fyear)) %>%
+  filter(at > 0) %>%
+  filter(emp > 0) %>%
+  filter(!is.na(ppent), ppent >= 0)
+
+# Exclude financials and utilities
+comp <- comp %>%
+  filter(!(sic >= 6000 & sic <= 6999)) %>%
+  filter(!(sic >= 4900 & sic <= 4999))
+
+comp <- comp %>%
+  arrange(gvkey, fyear) %>%
+  group_by(gvkey) %>%
+  mutate(
+    lag_at = lag(at),
+    asset_growth = (at - lag_at) / lag_at,
+    sales_growth = (sale - lag(sale)) / lag(sale)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Main automation proxy
+    automation_intensity = ppent / emp,
+    log_automation = log(1 + automation_intensity),
+    
+    # Alternative automation proxies
+    capex_intensity = capx / at,
+    rd_intensity = ifelse(is.na(xrd), 0, xrd) / at,
+    capital_intensity_assets = ppent / at,
+    
+    # Channels
+    productivity = sale / emp,
+    efficiency = sale / at,
+    sga_intensity = ifelse(!is.na(sale) & sale > 0, xsga / sale, NA_real_),
+    cogs_intensity = ifelse(!is.na(sale) & sale > 0, cogs / sale, NA_real_),
+    cost_flexibility = -sga_intensity,
+    
+    # Controls
+    size_assets = log(at),
+    market_equity_comp = ifelse(!is.na(mkvalt), mkvalt, prcc_f * csho),
+    size_market = log(market_equity_comp),
+    book_equity = coalesce(seq, ceq),
+    book_to_market_comp = book_equity / market_equity_comp,
+    profitability_comp = oibdp / at,
+    roa_comp = ni / at,
+    leverage_comp = lt / at,
+    book_leverage = (dltt + dlc) / at,
+    tangibility = ppent / at,
+    
+    # Timing rule:
+    # Fiscal year t explains monthly returns from July t+1 to June t+2.
+    formation_year = fyear + 1
+  )
+
+comp <- comp %>%
+  group_by(fyear) %>%
+  mutate(
+    w_log_automation = winsorize(log_automation),
+    w_automation_intensity = winsorize(automation_intensity),
+    w_capex_intensity = winsorize(capex_intensity),
+    w_rd_intensity = winsorize(rd_intensity),
+    w_productivity = winsorize(productivity),
+    w_efficiency = winsorize(efficiency),
+    w_cost_flexibility = winsorize(cost_flexibility),
+    w_size_assets = winsorize(size_assets),
+    w_book_to_market_comp = winsorize(book_to_market_comp),
+    w_profitability_comp = winsorize(profitability_comp),
+    w_roa_comp = winsorize(roa_comp),
+    w_leverage_comp = winsorize(leverage_comp),
+    w_asset_growth = winsorize(asset_growth),
+    w_tangibility = winsorize(tangibility)
+  ) %>%
+  ungroup()
+
+write_csv(comp, "data/processed/compustat_clean.csv")
+
+cat("\nCompustat cleaned:\n")
+cat("Rows:", nrow(comp), "\n")
+cat("Unique firms:", n_distinct(comp$gvkey), "\n")
+cat("Fiscal years:", min(comp$fyear), "to", max(comp$fyear), "\n")
+
+
+# 5. Clean Fama-French factors and momentum
+
+ff5_raw <- add_missing_columns(
+  ff5_raw,
+  c("dateff", "mktrf", "smb", "hml", "rmw", "cma", "rf", "umd")
+)
+
+ff5 <- ff5_raw %>%
+  mutate(
+    date = parse_date_safe(dateff),
+    date = ceiling_date(date, "month") - days(1),
+    sample_year = year(date),
+    sample_month = month(date),
+    
+    mkt_rf = as.numeric(mktrf),
+    smb = as.numeric(smb),
+    hml = as.numeric(hml),
+    rmw = as.numeric(rmw),
+    cma = as.numeric(cma),
+    rf = as.numeric(rf),
+    mom = as.numeric(umd)
+  ) %>%
+  select(date, sample_year, sample_month, mkt_rf, smb, hml, rmw, cma, rf, mom)
+
+# Convert percent returns to decimals only if needed
+if (max(abs(ff5$mkt_rf), na.rm = TRUE) > 1) {
+  ff5 <- ff5 %>%
+    mutate(across(c(mkt_rf, smb, hml, rmw, cma, rf, mom), ~ .x / 100))
+}
+
+write_csv(ff5, "data/processed/ff5_clean.csv")
+
+cat("\nFama-French cleaned:\n")
+cat("Rows:", nrow(ff5), "\n")
+cat("Date range:", as.character(min(ff5$date)), "to", as.character(max(ff5$date)), "\n")
+
+
+# 6. Clean WRDS firm-level ratios
+
+ratios_raw <- add_missing_columns(
+  ratios_raw,
+  c(
+    "gvkey", "permno", "public_date", "ticker", "cusip",
+    "bm", "roa", "roe", "debt_assets", "debt_capital",
+    "de_ratio", "curr_ratio", "quick_ratio", "at_turn",
+    "gpm", "npm", "opmbd", "ps", "ptb"
+  )
+)
+
+ratios <- ratios_raw %>%
+  mutate(
+    gvkey = as.character(gvkey),
+    permno = as.character(permno),
+    public_date = parse_date_safe(public_date),
+    public_date = ceiling_date(public_date, "month") - days(1),
+    sample_year = year(public_date),
+    sample_month = month(public_date),
+    
+    ticker_ratio = as.character(ticker),
+    cusip_ratio = as.character(cusip),
+    
+    bm = as.numeric(bm),
+    roa = as.numeric(roa),
+    roe = as.numeric(roe),
+    debt_assets = as.numeric(debt_assets),
+    debt_capital = as.numeric(debt_capital),
+    de_ratio = as.numeric(de_ratio),
+    curr_ratio = as.numeric(curr_ratio),
+    quick_ratio = as.numeric(quick_ratio),
+    at_turn = as.numeric(at_turn),
+    gpm = as.numeric(gpm),
+    npm = as.numeric(npm),
+    opmbd = as.numeric(opmbd),
+    ps = as.numeric(ps),
+    ptb = as.numeric(ptb)
+  ) %>%
+  filter(!is.na(gvkey), !is.na(permno), !is.na(public_date))
+
+ratios <- ratios %>%
+  group_by(sample_year) %>%
+  mutate(
+    w_bm_ratio = winsorize(bm),
+    w_roa_ratio = winsorize(roa),
+    w_debt_assets_ratio = winsorize(debt_assets),
+    w_curr_ratio = winsorize(curr_ratio),
+    w_at_turn_ratio = winsorize(at_turn),
+    w_gpm_ratio = winsorize(gpm),
+    w_npm_ratio = winsorize(npm),
+    w_opmbd_ratio = winsorize(opmbd),
+    w_ps_ratio = winsorize(ps),
+    w_ptb_ratio = winsorize(ptb)
+  ) %>%
+  ungroup()
+
+# PERMNO-GVKEY link based on the most common GVKEY per PERMNO.
+permno_gvkey_link <- ratios %>%
+  filter(!is.na(permno), !is.na(gvkey)) %>%
+  count(permno, gvkey, name = "n_obs") %>%
+  group_by(permno) %>%
+  arrange(desc(n_obs), gvkey, .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(permno, gvkey)
+
+# Optional ratio table, one row per PERMNO-date
+ratios_unique <- ratios %>%
+  arrange(permno, public_date, gvkey) %>%
+  group_by(permno, public_date) %>%
+  summarise(
+    w_bm_ratio = mean(w_bm_ratio, na.rm = TRUE),
+    w_roa_ratio = mean(w_roa_ratio, na.rm = TRUE),
+    w_debt_assets_ratio = mean(w_debt_assets_ratio, na.rm = TRUE),
+    w_curr_ratio = mean(w_curr_ratio, na.rm = TRUE),
+    w_at_turn_ratio = mean(w_at_turn_ratio, na.rm = TRUE),
+    w_gpm_ratio = mean(w_gpm_ratio, na.rm = TRUE),
+    w_npm_ratio = mean(w_npm_ratio, na.rm = TRUE),
+    w_opmbd_ratio = mean(w_opmbd_ratio, na.rm = TRUE),
+    w_ps_ratio = mean(w_ps_ratio, na.rm = TRUE),
+    w_ptb_ratio = mean(w_ptb_ratio, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.nan(.x), NA_real_, .x)))
+
+write_csv(ratios, "data/processed/wrds_ratios_clean.csv")
+write_csv(permno_gvkey_link, "data/processed/permno_gvkey_link.csv")
+write_csv(ratios_unique, "data/processed/wrds_ratios_unique.csv")
+
+cat("\nWRDS ratios cleaned:\n")
+cat("Rows:", nrow(ratios), "\n")
+cat("Unique PERMNO-GVKEY links:", nrow(permno_gvkey_link), "\n")
+
+
+# 7. Create final monthly panel
+
+crsp_for_merge <- crsp %>%
+  mutate(
+    formation_year = ifelse(sample_month >= 7, sample_year, sample_year - 1)
+  )
+
+panel <- crsp_for_merge %>%
+  left_join(permno_gvkey_link, by = "permno") %>%
+  filter(!is.na(gvkey)) %>%
+  inner_join(
+    comp,
+    by = c("gvkey", "formation_year")
+  ) %>%
+  left_join(ff5, by = "date") %>%
+  left_join(
+    ratios_unique,
+    by = c("permno" = "permno", "date" = "public_date")
+  ) %>%
+  mutate(
+    excess_return = stock_return - rf,
+    
+    automation = w_log_automation,
+    automation_raw = w_automation_intensity,
+    
+    size = w_size_assets,
+    book_to_market = coalesce(w_bm_ratio, w_book_to_market_comp),
+    profitability = coalesce(w_roa_ratio, w_profitability_comp),
+    leverage = coalesce(w_debt_assets_ratio, w_leverage_comp),
+    investment = w_asset_growth,
+    
+    productivity_channel = w_productivity,
+    efficiency_channel = w_efficiency,
+    cost_flexibility_channel = w_cost_flexibility,
+    
+    sic2 = floor(sic / 100),
+    
+    industry_group = case_when(
+      sic >= 1000 & sic <= 1499 ~ "Mining",
+      sic >= 1500 & sic <= 1799 ~ "Construction",
+      sic >= 2000 & sic <= 3999 ~ "Manufacturing",
+      sic >= 4000 & sic <= 4899 ~ "Transport_Communication",
+      sic >= 5000 & sic <= 5999 ~ "Trade",
+      sic >= 7000 & sic <= 8999 ~ "Services",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(!is.na(excess_return)) %>%
+  filter(!is.na(automation)) %>%
+  filter(!is.na(size)) %>%
+  filter(!is.na(book_to_market)) %>%
+  filter(!is.na(profitability)) %>%
+  filter(!is.na(leverage)) %>%
+  filter(!is.na(sic2)) %>%
+  arrange(permno, date, gvkey) %>%
+  group_by(permno, date) %>%
+  slice(1) %>%
+  ungroup()
+
+write_csv(panel, "data/processed/final_monthly_panel.csv")
+
+cat("\nFinal monthly panel:\n")
+cat("Rows:", nrow(panel), "\n")
+cat("Unique firms:", n_distinct(panel$permno), "\n")
+cat("Date range:", as.character(min(panel$date)), "to", as.character(max(panel$date)), "\n")
+cat("Unique months:", n_distinct(panel$date), "\n")
+cat("Unique industries:", n_distinct(panel$sic2), "\n")
+
+duplicates_check <- panel %>%
+  count(permno, date) %>%
+  filter(n > 1)
+
+cat("Duplicate PERMNO-date rows:", nrow(duplicates_check), "\n")
+
+
+# 8. Sample overview
+
+sample_overview <- panel %>%
+  summarise(
+    start_date = min(date, na.rm = TRUE),
+    end_date = max(date, na.rm = TRUE),
+    number_of_months = n_distinct(date),
+    firm_month_observations = n(),
+    unique_firms = n_distinct(permno),
+    unique_gvkeys = n_distinct(gvkey),
+    unique_industries = n_distinct(sic2),
+    average_firms_per_month = n() / n_distinct(date)
+  )
+
+write_csv(sample_overview, "output/tables/sample_overview.csv")
+print(sample_overview)
+
+monthly_coverage <- panel %>%
+  distinct(date) %>%
+  mutate(year = lubridate::year(date)) %>%
+  count(year)
+
+write_csv(monthly_coverage, "output/tables/monthly_coverage_by_year.csv")
+print(monthly_coverage, n = Inf)
+
+
+# 9. Descriptive statistics
+
+desc_table <- panel %>%
+  select(
+    excess_return,
+    stock_return,
+    automation,
+    automation_raw,
+    w_capex_intensity,
+    w_rd_intensity,
+    size,
+    book_to_market,
+    profitability,
+    leverage,
+    investment,
+    productivity_channel,
+    efficiency_channel,
+    cost_flexibility_channel,
+    market_cap
+  ) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    n = sum(!is.na(value)),
+    mean = mean(value, na.rm = TRUE),
+    sd = sd(value, na.rm = TRUE),
+    p25 = quantile(value, 0.25, na.rm = TRUE),
+    median = median(value, na.rm = TRUE),
+    p75 = quantile(value, 0.75, na.rm = TRUE),
+    min = min(value, na.rm = TRUE),
+    max = max(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(desc_table, "output/tables/descriptive_statistics.csv")
+print(desc_table)
+
+
+# 10. Correlation matrix
+
+correlation_matrix <- panel %>%
+  select(
+    excess_return,
+    automation,
+    w_capex_intensity,
+    w_rd_intensity,
+    size,
+    book_to_market,
+    profitability,
+    leverage,
+    investment,
+    productivity_channel,
+    efficiency_channel,
+    cost_flexibility_channel
+  ) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column("variable")
+
+write_csv(correlation_matrix, "output/tables/correlation_matrix.csv")
+print(correlation_matrix)
+
+
+# 11. Baseline direct effect
+
+h1_model_1 <- feols(
+  excess_return ~ automation |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_model_2 <- feols(
+  excess_return ~ automation + size + book_to_market |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_model_3 <- feols(
+  excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_model_4 <- feols(
+  excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+    permno + date,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+sink("output/tables/baseline_direct_effect.txt")
+etable(h1_model_1, h1_model_2, h1_model_3, h1_model_4)
+sink()
+
+etable(h1_model_1, h1_model_2, h1_model_3, h1_model_4)
+
+
+# 12. H1: Productivity and efficiency channel
+
+h1_productivity_a <- feols(
+  productivity_channel ~ automation + size + book_to_market + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_productivity_b <- feols(
+  excess_return ~ automation + productivity_channel + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_efficiency_a <- feols(
+  efficiency_channel ~ automation + size + book_to_market + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h1_efficiency_b <- feols(
+  excess_return ~ automation + efficiency_channel + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+sink("output/tables/h1_productivity_efficiency_channel.txt")
+etable(h1_productivity_a, h1_productivity_b, h1_efficiency_a, h1_efficiency_b)
+sink()
+
+etable(h1_productivity_a, h1_productivity_b, h1_efficiency_a, h1_efficiency_b)
+
+
+# 13. H2: Cost structure channel
+
+h2_cost_a <- feols(
+  cost_flexibility_channel ~ automation + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+h2_cost_b <- feols(
+  excess_return ~ automation + cost_flexibility_channel + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+sink("output/tables/h2_cost_structure_channel.txt")
+etable(h2_cost_a, h2_cost_b)
+sink()
+
+etable(h2_cost_a, h2_cost_b)
+
+
+# 14. H3: Risk channel
+
+panel <- panel %>%
+  arrange(permno, date) %>%
+  group_by(permno) %>%
+  mutate(
+    risk_volatility = zoo::rollapply(
+      stock_return,
+      width = 12,
+      FUN = sd,
+      fill = NA,
+      align = "right",
+      na.rm = TRUE
+    )
+  ) %>%
+  ungroup()
+
+risk_model_a <- feols(
+  risk_volatility ~ automation + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+risk_model_b <- feols(
+  excess_return ~ automation + risk_volatility + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+sink("output/tables/h3_risk_channel.txt")
+etable(risk_model_a, risk_model_b)
+sink()
+
+etable(risk_model_a, risk_model_b)
+
+
+# 15. H4: Industry heterogeneity
+
+industry_counts <- panel %>%
+  count(industry_group, sort = TRUE)
+
+write_csv(industry_counts, "output/tables/industry_counts.csv")
+print(industry_counts)
+
+industry_list <- industry_counts %>%
+  filter(n >= 500) %>%
+  pull(industry_group)
+
+run_industry_model <- function(ind) {
+  data_ind <- panel %>%
+    filter(industry_group == ind)
+  
+  model <- feols(
+    excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+      date,
+    data = data_ind,
+    cluster = ~ permno
+  )
+  
+  result <- broom::tidy(model) %>%
+    filter(term == "automation") %>%
+    mutate(
+      industry_group = ind,
+      observations = nobs(model)
+    )
+  
+  return(result)
+}
+
+h4_industry_results <- purrr::map_dfr(industry_list, run_industry_model)
+
+write_csv(h4_industry_results, "output/tables/h4_industry_heterogeneity.csv")
+print(h4_industry_results)
+
+
+# 16. Portfolio sorts
+
+portfolio_data <- panel %>%
+  group_by(date) %>%
+  mutate(
+    automation_portfolio = ntile(automation, 5)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(automation_portfolio))
+
+ew_returns <- portfolio_data %>%
+  group_by(date, automation_portfolio) %>%
+  summarise(
+    ew_return = mean(excess_return, na.rm = TRUE),
+    n_firms = n_distinct(permno),
+    avg_automation = mean(automation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+vw_returns <- portfolio_data %>%
+  filter(!is.na(lag_market_cap), lag_market_cap > 0) %>%
+  group_by(date, automation_portfolio) %>%
+  mutate(weight = lag_market_cap / sum(lag_market_cap, na.rm = TRUE)) %>%
+  summarise(
+    vw_return = sum(weight * excess_return, na.rm = TRUE),
+    n_firms = n_distinct(permno),
+    avg_automation = weighted.mean(automation, weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ew_table <- ew_returns %>%
+  group_by(automation_portfolio) %>%
+  summarise(
+    avg_monthly_excess_return = mean(ew_return, na.rm = TRUE),
+    annualized_excess_return = (1 + avg_monthly_excess_return)^12 - 1,
+    sd_monthly_return = sd(ew_return, na.rm = TRUE),
+    avg_n_firms = mean(n_firms, na.rm = TRUE),
+    avg_automation = mean(avg_automation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+vw_table <- vw_returns %>%
+  group_by(automation_portfolio) %>%
+  summarise(
+    avg_monthly_excess_return = mean(vw_return, na.rm = TRUE),
+    annualized_excess_return = (1 + avg_monthly_excess_return)^12 - 1,
+    sd_monthly_return = sd(vw_return, na.rm = TRUE),
+    avg_n_firms = mean(n_firms, na.rm = TRUE),
+    avg_automation = mean(avg_automation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(ew_table, "output/tables/equal_weighted_quintile_returns.csv")
+write_csv(vw_table, "output/tables/value_weighted_quintile_returns.csv")
+
+print(ew_table)
+print(vw_table)
+
+
+# 17. High-minus-low portfolio and factor alpha
+
+hml_automation <- ew_returns %>%
+  select(date, automation_portfolio, ew_return) %>%
+  pivot_wider(
+    names_from = automation_portfolio,
+    values_from = ew_return,
+    names_prefix = "p"
+  ) %>%
+  mutate(
+    high_minus_low = p5 - p1
+  ) %>%
+  left_join(ff5, by = "date") %>%
+  filter(!is.na(high_minus_low))
+
+hml_mean_model <- lm(high_minus_low ~ 1, data = hml_automation)
+
+hml_mean_test <- coeftest(
+  hml_mean_model,
+  vcov = NeweyWest(hml_mean_model, lag = 6, prewhite = FALSE)
+)
+
+sink("output/tables/high_minus_low_mean_test.txt")
+print(hml_mean_test)
+sink()
+
+print(hml_mean_test)
+
+alpha_model <- lm(
+  high_minus_low ~ mkt_rf + smb + hml + rmw + cma + mom,
+  data = hml_automation
+)
+
+alpha_test <- coeftest(
+  alpha_model,
+  vcov = NeweyWest(alpha_model, lag = 6, prewhite = FALSE)
+)
+
+sink("output/tables/ff5_momentum_alpha.txt")
+print(alpha_test)
+sink()
+
+print(alpha_test)
+
+
+# 18. Robustness tests
+
+robust_capex <- feols(
+  excess_return ~ w_capex_intensity + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+robust_rd <- feols(
+  excess_return ~ w_rd_intensity + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel,
+  cluster = ~ permno + date
+)
+
+panel_no_micro <- panel %>%
+  group_by(date) %>%
+  mutate(size_rank = percent_rank(lag_market_cap)) %>%
+  ungroup() %>%
+  filter(size_rank > 0.20)
+
+robust_no_micro <- feols(
+  excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel_no_micro,
+  cluster = ~ permno + date
+)
+
+panel_post2010 <- panel %>%
+  mutate(sample_year_check = lubridate::year(date)) %>%
+  filter(sample_year_check >= 2010)
+
+robust_post2010 <- feols(
+  excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+    date + sic2,
+  data = panel_post2010,
+  cluster = ~ permno + date
+)
+
+sink("output/tables/robustness_tests.txt")
+etable(
+  h1_model_3,
+  robust_capex,
+  robust_rd,
+  robust_no_micro,
+  robust_post2010
+)
+sink()
+
+etable(
+  h1_model_3,
+  robust_capex,
+  robust_rd,
+  robust_no_micro,
+  robust_post2010
+)
+
+
+# 19. Annual return analysis
+
+panel <- panel %>%
+  mutate(
+    sample_year_final = lubridate::year(date)
+  )
+
+annual_panel <- panel %>%
+  group_by(permno, gvkey, sample_year_final) %>%
+  summarise(
+    annual_return = compound_return(stock_return),
+    annual_excess_return = compound_return(excess_return),
+    automation = first(automation),
+    size = first(size),
+    book_to_market = first(book_to_market),
+    profitability = first(profitability),
+    leverage = first(leverage),
+    investment = first(investment),
+    sic2 = first(sic2),
+    n_months = sum(!is.na(stock_return)),
+    .groups = "drop"
+  ) %>%
+  filter(n_months >= 6) %>%
+  filter(!is.na(annual_excess_return), !is.na(automation))
+
+annual_model <- feols(
+  annual_excess_return ~ automation + size + book_to_market + profitability + leverage + investment |
+    sample_year_final + sic2,
+  data = annual_panel,
+  cluster = ~ permno + sample_year_final
+)
+
+sink("output/tables/annual_return_regression.txt")
+etable(annual_model)
+sink()
+
+etable(annual_model)
+
+write_csv(annual_panel, "data/processed/final_annual_panel.csv")
+
+
+# 20. Cumulative high-minus-low plot
+
+hml_plot <- hml_automation %>%
+  arrange(date) %>%
+  mutate(
+    cumulative_return = cumprod(1 + high_minus_low) - 1
+  )
+
+hml_chart <- ggplot(hml_plot, aes(x = date, y = cumulative_return)) +
+  geom_line() +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Cumulative Return of High-minus-Low Automation Portfolio",
+    x = "Date",
+    y = "Cumulative Excess Return"
+  ) +
+  theme_minimal()
+
+print(hml_chart)
+
+ggsave(
+  "output/figures/cumulative_high_minus_low_automation.png",
+  plot = hml_chart,
+  width = 8,
+  height = 5
+)
+
+
+# 21. Variable definitions
+
+variable_definitions <- tibble(
+  variable = c(
+    "stock_return",
+    "excess_return",
+    "automation",
+    "automation_raw",
+    "w_capex_intensity",
+    "w_rd_intensity",
+    "size",
+    "book_to_market",
+    "profitability",
+    "leverage",
+    "investment",
+    "productivity_channel",
+    "efficiency_channel",
+    "cost_flexibility_channel",
+    "risk_volatility"
+  ),
+  definition = c(
+    "Monthly CRSP stock return.",
+    "Monthly CRSP stock return minus the Fama-French risk-free rate.",
+    "Log of one plus automation intensity, where automation intensity is PP&E per employee.",
+    "Net property, plant and equipment divided by number of employees.",
+    "Capital expenditure divided by total assets.",
+    "Research and development expense divided by total assets.",
+    "Natural logarithm of total assets.",
+    "Book equity divided by market equity.",
+    "Operating income before depreciation divided by total assets or ROA from WRDS ratios where available.",
+    "Total liabilities divided by total assets or debt-to-assets from WRDS ratios where available.",
+    "Annual asset growth.",
+    "Sales divided by number of employees.",
+    "Sales divided by total assets.",
+    "Negative SG&A intensity, calculated as negative SG&A expense divided by sales.",
+    "Rolling 12-month standard deviation of monthly stock returns."
+  )
+)
+
+write_csv(variable_definitions, "output/tables/variable_definitions.csv")
+
+
+# 22. Output check
+
+cat("\nAnalysis complete.\n")
+
+cat("\nProcessed data files:\n")
+print(list.files("data/processed"))
+
+cat("\nTable outputs:\n")
+print(list.files("output/tables"))
+
+cat("\nFigure outputs:\n")
+print(list.files("output/figures"))
+
+cat("\nFinal panel check:\n")
+cat("Rows:", nrow(panel), "\n")
+cat("Firms:", n_distinct(panel$permno), "\n")
+cat("Months:", n_distinct(panel$date), "\n")
+cat("Date range:", as.character(min(panel$date)), "to", as.character(max(panel$date)), "\n")
+
+cat("\nMain thesis outputs to open:\n")
+cat("1. output/tables/sample_overview.csv\n")
+cat("2. output/tables/descriptive_statistics.csv\n")
+cat("3. output/tables/baseline_direct_effect.txt\n")
+cat("4. output/tables/h1_productivity_efficiency_channel.txt\n")
+cat("5. output/tables/h2_cost_structure_channel.txt\n")
+cat("6. output/tables/h3_risk_channel.txt\n")
+cat("7. output/tables/h4_industry_heterogeneity.csv\n")
+cat("8. output/tables/equal_weighted_quintile_returns.csv\n")
+cat("9. output/tables/ff5_momentum_alpha.txt\n")
+cat("10. output/tables/robustness_tests.txt\n")
+cat("11. output/figures/cumulative_high_minus_low_automation.png\n")
+
+# Correlation heatmap
+
+library(tidyverse)
+
+corr_long <- as.data.frame(correlation_matrix) %>%
+  rownames_to_column("Var1") %>%
+  pivot_longer(-Var1, names_to = "Var2", values_to = "Correlation")
+
+corr_heatmap <- ggplot(corr_long, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Correlation, 2)), size = 3) +
+  scale_fill_gradient2(
+    low = "navy",
+    mid = "white",
+    high = "darkred",
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  labs(
+    title = "Correlation Heatmap of Main Variables",
+    x = "",
+    y = "",
+    fill = "Correlation"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+print(corr_heatmap)
+
+ggsave(
+  "output/figures/correlation_heatmap.png",
+  plot = corr_heatmap,
+  width = 9,
+  height = 7
+)
