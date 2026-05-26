@@ -1,0 +1,21 @@
+Equal Weighted Portfolios,,,,,,,,,,,,
+Automation Portfolio,Avg Monthly Excess Return,Annualized Excess Return,SD Monthly Return,Avg No. of Firms,Avg. Automation,,t test of coefficients:,,,,,
+1,0.0059,0.0728,0.0691,299.4978,2.0358,,,,,,,
+2,0.0075,0.0934,0.0667,299.2915,3.2703,,             Estimate Std. Error,,,,,
+3,0.0091,0.1147,0.0649,299.1121,3.8295,,(Intercept) 0.0013284  0.0029718,,,,,
+4,0.0087,0.1099,0.0644,298.9372,4.4434,,            t value Pr(>|t|),,,,,
+5,0.0072,0.0899,0.0746,298.7085,6.2261,,(Intercept)   0.447   0.6553,,,,,
+,,,,,,,,High-minus-Low Mean Return,,,,
+,,,,,,,,Test,Estimate,Std. Error,t-statistic,p-value
+,,,,,,,,HML Mean Return,0.0013,0.003,0.447,0.6553
+,,,,,,,,,,,,
+,,,,,,,,,,,,
+,,,,,,,,Fama-French Factors,,,,
+,Automation Portfolio,Avg Monthly Excess Return,Annualized Excess Return,SD Monthly Return,Avg No. of Firms,Avg. Automation,,Variable,Estimate,Std. Error,t-statistic,p-value
+,1,0.0077,0.0958,0.0524,298.6637,2.4072,,Alpha,-0.0016,0.0025,-0.621,0.535
+,2,0.0083,0.1045,0.0531,299.0493,3.3247,,Market factor,0.1948***,0.0465,4.19,<0.001
+,3,0.0088,0.1106,0.0452,298.9731,3.8666,,Size factor,-0.0781,0.1152,-0.678,0.498
+,4,0.0088,0.1107,0.0451,298.7758,4.4772,,Value factor,0.3739***,0.0839,4.455,<0.001
+,5,0.0081,0.1018,0.0427,298.3722,6.0428,,Profitability factor,0.5167***,0.1174,4.4,<0.001
+,,,,,,,,Investment factor,0.122,0.1499,0.814,0.417
+,,,,,,,,Momentum factor,-0.0158,0.1023,-0.155,0.877

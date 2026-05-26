@@ -1,0 +1,19 @@
+                          annual_model
+Dependent Var.:   annual_excess_return
+                                      
+automation             0.0058 (0.0086)
+size                   0.0023 (0.0071)
+book_to_market        0.0340. (0.0193)
+profitability          0.0882 (0.0537)
+leverage              0.0432. (0.0236)
+investment            -0.0070 (0.0143)
+Fixed-Effects:    --------------------
+sample_year_final                  Yes
+sic2                               Yes
+_________________ ____________________
+S.E.: Clustered      by: perm. & samp.
+Observations                    23,472
+R2                             0.08066
+Within R2                      0.00235
+---
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
