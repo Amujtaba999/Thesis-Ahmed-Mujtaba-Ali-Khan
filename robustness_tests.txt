@@ -1,0 +1,101 @@
+                           h1_model_3
+Dependent Var.:         excess_return
+                                     
+automation           9.91e-5 (0.0007)
+size                 -0.0003 (0.0006)
+book_to_market      0.0051** (0.0017)
+profitability      0.0179*** (0.0043)
+leverage            0.0071** (0.0025)
+investment        -0.0030*** (0.0008)
+w_capex_intensity                    
+w_rd_intensity                       
+Fixed-Effects:    -------------------
+date                              Yes
+sic2                              Yes
+_________________ ___________________
+S.E.: Clustered     by: permno & date
+Observations                  298,821
+R2                            0.09551
+Within R2                     0.00104
+
+                         robust_capex
+Dependent Var.:         excess_return
+                                     
+automation                           
+size                 -0.0003 (0.0005)
+book_to_market      0.0051** (0.0017)
+profitability      0.0183*** (0.0044)
+leverage            0.0074** (0.0025)
+investment        -0.0030*** (0.0008)
+w_capex_intensity   -0.0365* (0.0144)
+w_rd_intensity                       
+Fixed-Effects:    -------------------
+date                              Yes
+sic2                              Yes
+_________________ ___________________
+S.E.: Clustered     by: permno & date
+Observations                  298,507
+R2                            0.09553
+Within R2                     0.00109
+
+                            robust_rd
+Dependent Var.:         excess_return
+                                     
+automation                           
+size                 -0.0002 (0.0005)
+book_to_market      0.0054** (0.0017)
+profitability      0.0219*** (0.0049)
+leverage            0.0076** (0.0025)
+investment        -0.0027*** (0.0008)
+w_capex_intensity                    
+w_rd_intensity       0.0123* (0.0059)
+Fixed-Effects:    -------------------
+date                              Yes
+sic2                              Yes
+_________________ ___________________
+S.E.: Clustered     by: permno & date
+Observations                  298,821
+R2                            0.09556
+Within R2                     0.00109
+
+                     robust_no_micro
+Dependent Var.:        excess_return
+                                    
+automation         -5.06e-5 (0.0007)
+size                4.96e-5 (0.0005)
+book_to_market      0.0048* (0.0020)
+profitability       0.0139* (0.0054)
+leverage            0.0062* (0.0028)
+investment        -0.0030** (0.0009)
+w_capex_intensity                   
+w_rd_intensity                      
+Fixed-Effects:    ------------------
+date                             Yes
+sic2                             Yes
+_________________ __________________
+S.E.: Clustered    by: permno & date
+Observations                 239,359
+R2                           0.16014
+Within R2                    0.00103
+
+                      robust_post2010
+Dependent Var.:         excess_return
+                                     
+automation           9.07e-5 (0.0007)
+size                 -0.0002 (0.0006)
+book_to_market      0.0049** (0.0018)
+profitability      0.0185*** (0.0044)
+leverage             0.0070* (0.0027)
+investment        -0.0031*** (0.0009)
+w_capex_intensity                    
+w_rd_intensity                       
+Fixed-Effects:    -------------------
+date                              Yes
+sic2                              Yes
+_________________ ___________________
+S.E.: Clustered     by: permno & date
+Observations                  266,159
+R2                            0.08486
+Within R2                     0.00109
+---
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1

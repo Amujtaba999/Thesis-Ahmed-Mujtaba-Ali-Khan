@@ -1,0 +1,8 @@
+
+t test of coefficients:
+
+             Estimate Std. Error
+(Intercept) 0.0013284  0.0029718
+            t value Pr(>|t|)
+(Intercept)   0.447   0.6553
+
