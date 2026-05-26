@@ -1,0 +1,19 @@
+The code expects the following input files to be available locally:
+
+- CRSP monthly stock return file
+- Compustat annual fundamentals file
+- WRDS firm-level ratios file
+- Fama-French monthly factor file
+- Momentum factor file
+
+Users should update the file paths at the beginning of the R script before running the analysis.
+
+## Reproduction Steps
+
+1. Download the required datasets from CRSP, Compustat, WRDS and the Fama-French data library.
+2. Save the files locally.
+3. Open `code/thesis_analysis_full_code.R`.
+4. Update the file paths in the data import section.
+5. Run the script from top to bottom.
+
+The script performs data cleaning, variable construction, merging, panel regressions, channel analysis, portfolio sorting, factor regressions and robustness tests.
